@@ -456,6 +456,11 @@ voice_for_provider() { # voice_for_provider <name>
       voice="$(cfg .google.voice "")"
       [[ -n "$voice" ]] || voice="$(cached_remote_voices google | preferred_google_voice)"
       ;;
+    teratts)
+      voice="$(cfg .teratts.voice "")"
+      [[ -n "$voice" ]] || voice="$(cached_remote_voices teratts | jq -r '(map(select(.value == "ru_f1"))[0].value // .[0].value // empty)')"
+      [[ -n "$voice" ]] || voice="ru_f1"
+      ;;
   esac
   printf '%s' "$voice"
 }
@@ -521,6 +526,11 @@ refresh_remote_voices() { # refresh_remote_voices <name>
     local pick
     pick="$(preferred_google_voice < "$cache")"
     [[ -n "$pick" ]] && { tts_config_set .google.voice "$pick" || true; }
+  fi
+  if [[ "$name" == teratts && -z "$(cfg .teratts.voice "")" ]]; then
+    local first_voice
+    first_voice="$(jq -r '(map(select(.value == "ru_f1"))[0].value // .[0].value // empty)' "$cache")"
+    [[ -n "$first_voice" ]] && { tts_config_set .teratts.voice "$first_voice" || true; }
   fi
   # Return a confirmation, not the account-specific names. The cache is read
   # privately by --info and the panel reload that follows this command.
@@ -756,6 +766,14 @@ emit_info() {
       if [[ -n "$voice" ]] && ! jq -e --arg v "$voice" 'any(.[]; .value == $v)' <<< "$vs" >/dev/null 2>&1; then
         vs="$(jq -c --arg v "$voice" '[{value:$v, label:($v + " · not in the current list")}] + .' <<< "$vs")"
       fi ;;
+    teratts)
+      voice_path=.teratts.voice
+      vs="$(cached_remote_voices teratts)"
+      if [[ -z "$vs" || "$vs" == "[]" ]]; then
+        vs="$(provider_voice_options teratts)"
+      fi
+      voice="$(voice_for_provider teratts)"
+      ;;
     *) voice=""; voice_path=.voice; vs='[]' ;;
   esac
   local speaking=false
@@ -1373,6 +1391,14 @@ input_bytes="${input_bytes//[[:space:]]/}"
 [[ "$input_bytes" -le "$INPUT_MAX_BYTES" ]] ||
   die "input is larger than the 1 MiB safety limit"
 
+# --- resolve provider -----------------------------------------------------
+PROVIDER="${PROVIDER:-$(cfg .provider piper)}"
+PROV_BIN="$(provider_path "$PROVIDER")" || die "no such provider: $PROVIDER (try --list)"
+
+if [[ $RAWMODE -eq 0 && "$(meta_of "$PROV_BIN" preprocess)" == "raw" ]]; then
+  RAWMODE=1
+fi
+
 # --- sanitize -------------------------------------------------------------
 if [[ $RAWMODE -eq 0 ]]; then
   MAXCHARS="${MAXCHARS:-$(cfg .maxChars 0)}"
@@ -1389,10 +1415,6 @@ if [[ $RAWMODE -eq 0 ]]; then
 else
   SPOKEN="$TEXT"
 fi
-
-# --- resolve provider -----------------------------------------------------
-PROVIDER="${PROVIDER:-$(cfg .provider piper)}"
-PROV_BIN="$(provider_path "$PROVIDER")" || die "no such provider: $PROVIDER (try --list)"
 
 export TTS_VOICE="$VOICE"
 export TTS_PLUGIN_DIR="$PLUGIN_DIR"

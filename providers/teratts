@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+# desc: Self-hosted TeraTTSv2 server with ruaccent and speechfront
+# title: TeraTTS
+# kind: cloud
+# probe: endpoint="${TERATTS_URL:-$(jq -r '.teratts.endpoint // "https://teratts.tail9fd337.ts.net"' "$TTS_CONFIG" 2>/dev/null)}"; [[ -z "$endpoint" || "$endpoint" == "null" ]] && endpoint="https://teratts.tail9fd337.ts.net"; curl -s -m 2 "${endpoint%/}/health" | grep -q '"status":"ready"'
+# vendor: TeraTTS
+# keyname: teratts
+# keyenv: TERATTS_BEARER_TOKEN
+# voices: remote
+# refreshvoices: true
+# maxchars: 100000
+# ratemin: 0.25
+# ratemax: 4.0
+# preprocess: raw
+set -uo pipefail
+umask 077
+source "$TTS_PLUGIN_DIR/lib/play.sh"
+source "$TTS_PLUGIN_DIR/lib/keys.sh"
+
+ENDPOINT="${TERATTS_URL:-}"
+[[ -z "$ENDPOINT" ]] && ENDPOINT="$(jq -r '.teratts.endpoint // "https://teratts.tail9fd337.ts.net"' "$TTS_CONFIG" 2>/dev/null)"
+[[ -z "$ENDPOINT" || "$ENDPOINT" == "null" ]] && ENDPOINT="https://teratts.tail9fd337.ts.net"
+ENDPOINT="${ENDPOINT%/}"
+
+if [[ "${1:-}" == "--voices" ]]; then
+  health_json="$(curl -s -m 3 "$ENDPOINT/health" 2>/dev/null || true)"
+  if jq -e '.voices | type == "array" and length > 0' <<< "$health_json" >/dev/null 2>&1; then
+    jq -c '[.voices[] | {
+      value: .,
+      label: (
+        if . == "ru_f1" then "Russian Female 1"
+        elif . == "ru_f2" then "Russian Female 2"
+        elif . == "ru_m1" then "Russian Male 1"
+        elif . == "ru_m5" then "Russian Male 5"
+        elif . == "eng_f3" then "English Female 3"
+        elif . == "eng_f4_whisper" then "English Female 4 (Whisper)"
+        elif . == "eng_f5" then "English Female 5"
+        elif . == "eng_m2_whisper" then "English Male 2 (Whisper)"
+        elif . == "eng_m3" then "English Male 3"
+        elif . == "eng_m4" then "English Male 4"
+        else . end
+      ),
+      language: (if startswith("eng_") then "en" else "ru" end)
+    }]' <<< "$health_json"
+    exit 0
+  fi
+  jq -nc '[
+    {"value":"ru_f1","label":"Russian Female 1","language":"ru"},
+    {"value":"ru_f2","label":"Russian Female 2","language":"ru"},
+    {"value":"ru_m1","label":"Russian Male 1","language":"ru"},
+    {"value":"ru_m5","label":"Russian Male 5","language":"ru"},
+    {"value":"eng_f3","label":"English Female 3","language":"en"},
+    {"value":"eng_f4_whisper","label":"English Female 4 (Whisper)","language":"en"},
+    {"value":"eng_f5","label":"English Female 5","language":"en"},
+    {"value":"eng_m2_whisper","label":"English Male 2 (Whisper)","language":"en"},
+    {"value":"eng_m3","label":"English Male 3","language":"en"},
+    {"value":"eng_m4","label":"English Male 4","language":"en"}
+  ]'
+  exit 0
+fi
+
+KEY="$(get_key TERATTS_BEARER_TOKEN teratts || true)"
+if [[ -z "$KEY" ]]; then
+  KEY="$(get_key TERATTS_BEARER_TOKEN teratts)" || exit 1
+fi
+
+VOICE="${TTS_VOICE:-}"
+[[ -z "$VOICE" ]] && VOICE="$(jq -r '.teratts.voice // "ru_f1"' "$TTS_CONFIG" 2>/dev/null)"
+[[ -z "$VOICE" || "$VOICE" == "null" ]] && VOICE="ru_f1"
+
+TEXT_MODE="$(jq -r '.teratts.text_mode // "russian_only"' "$TTS_CONFIG" 2>/dev/null)"
+[[ -z "$TEXT_MODE" || "$TEXT_MODE" == "null" ]] && TEXT_MODE="russian_only"
+
+SPEECH_FRONT="$(jq -r '.teratts.speech_front // true' "$TTS_CONFIG" 2>/dev/null)"
+[[ "$SPEECH_FRONT" != "false" ]] && SPEECH_FRONT="true"
+
+TERATTS_ENDPOINT="$ENDPOINT" \
+TERATTS_TOKEN="$KEY" \
+TERATTS_VOICE="$VOICE" \
+TERATTS_RATE="${TTS_RATE:-1.0}" \
+TERATTS_TEXT_MODE="$TEXT_MODE" \
+TERATTS_SPEECH_FRONT="$SPEECH_FRONT" \
+python3 3<&0 - <<'TERATTS_PY' | play_raw 44100 1
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.request
+
+def split_text_into_chunks(text, max_chunk=2000, first_chunk=240, second_chunk=480):
+    text = text.strip()
+    if not text:
+        return []
+    if len(text) <= first_chunk:
+        return [text]
+
+    sentence_pat = re.compile(r"(?<=[.!?…])\s+(?![0-9])")
+    chunks = []
+    current_chunk = []
+    current_len = 0
+
+    def get_target(idx):
+        if idx == 0:
+            return first_chunk
+        elif idx == 1:
+            return second_chunk
+        return max_chunk
+
+    raw_sentences = []
+    for para in text.splitlines():
+        para = para.strip()
+        if not para:
+            continue
+        for p in sentence_pat.split(para):
+            p = p.strip()
+            if p:
+                raw_sentences.append(p)
+
+    for s in raw_sentences:
+        target = get_target(len(chunks))
+        s_len = len(s)
+        if current_chunk and (current_len + 1 + s_len > target):
+            chunks.append(" ".join(current_chunk))
+            current_chunk = []
+            current_len = 0
+            target = get_target(len(chunks))
+
+        if s_len > max_chunk:
+            clauses = re.split(r"(?<=[,;:—\)])\s+", s)
+            for c in clauses:
+                c = c.strip()
+                if not c:
+                    continue
+                if current_chunk and (current_len + 1 + len(c) > target):
+                    chunks.append(" ".join(current_chunk))
+                    current_chunk = []
+                    current_len = 0
+                    target = get_target(len(chunks))
+                if len(c) > max_chunk:
+                    for word in c.split():
+                        if current_chunk and (current_len + 1 + len(word) > target):
+                            chunks.append(" ".join(current_chunk))
+                            current_chunk = []
+                            current_len = 0
+                            target = get_target(len(chunks))
+                        current_chunk.append(word)
+                        current_len += len(word) + 1
+                else:
+                    current_chunk.append(c)
+                    current_len += len(c) + 1
+        else:
+            current_chunk.append(s)
+            current_len += len(s) + 1
+
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
+
+    return chunks
+
+try:
+    with os.fdopen(3, encoding="utf-8") as source:
+        text = source.read()
+except Exception:
+    text = sys.stdin.read()
+
+if not text.strip():
+    sys.exit(0)
+
+endpoint = os.environ.get("TERATTS_ENDPOINT", "https://teratts.tail9fd337.ts.net").rstrip("/")
+token = os.environ.get("TERATTS_TOKEN", "").strip()
+voice = os.environ.get("TERATTS_VOICE", "ru_f1")
+language = "en" if voice.startswith("eng_") else "ru"
+text_mode = os.environ.get("TERATTS_TEXT_MODE", "russian_only")
+speech_front = os.environ.get("TERATTS_SPEECH_FRONT", "true").lower() == "true"
+
+try:
+    rate = float(os.environ.get("TERATTS_RATE", "1.0"))
+except ValueError:
+    rate = 1.0
+
+duration_scale = 1.0 / rate if rate > 0 else 1.0
+duration_scale = max(0.25, min(4.0, duration_scale))
+
+chunks = split_text_into_chunks(text)
+tts_url = f"{endpoint}/tts"
+
+headers = {
+    "Content-Type": "application/json",
+    "User-Agent": "omarchy-tts/1.3.2"
+}
+if token:
+    headers["Authorization"] = f"Bearer {token}"
+
+for chunk in chunks:
+    payload = {
+        "text": chunk,
+        "voice": voice,
+        "language": language,
+        "duration_scale": round(duration_scale, 4),
+        "speech_front": speech_front,
+        "text_mode": text_mode
+    }
+    req = urllib.request.Request(
+        tts_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=35) as resp:
+            data = resp.read()
+    except urllib.error.HTTPError as err:
+        err_msg = err.read().decode("utf-8", errors="replace")[:300]
+        sys.stderr.write(f"teratts: HTTP {err.code}: {err_msg}\n")
+        if err.code in (401, 403):
+            sys.exit(64)
+        elif err.code in (429, 503, 504):
+            sys.exit(75)
+        sys.exit(1)
+    except urllib.error.URLError as err:
+        sys.stderr.write(f"teratts: network error: {err.reason}\n")
+        sys.exit(74)
+    except Exception as err:
+        sys.stderr.write(f"teratts: request error: {err}\n")
+        sys.exit(1)
+
+    if len(data) < 44 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        sys.stderr.write(f"teratts: invalid WAV response ({len(data)} bytes)\n")
+        sys.exit(74)
+
+    pcm = data[44:]
+    sys.stdout.buffer.write(pcm)
+    sys.stdout.buffer.flush()
+TERATTS_PY
