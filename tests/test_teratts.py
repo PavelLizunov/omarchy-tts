@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SPEAK = str(ROOT / "bin" / "speak")
+SETUP = str(ROOT / "bin" / "speak-setup")
 TERATTS_PROVIDER = str(ROOT / "providers" / "teratts")
 
 def make_dummy_wav(duration_frames=100, sample_rate=44100):
@@ -19,7 +20,6 @@ def make_dummy_wav(duration_frames=100, sample_rate=44100):
     pcm_bytes = b"\x00\x00" * duration_frames
     data_size = len(pcm_bytes)
     riff_size = data_size + 36
-    # RIFF header
     header = struct.pack(
         "<4sI4s4sIHHIIHH4sI",
         b"RIFF",
@@ -30,9 +30,9 @@ def make_dummy_wav(duration_frames=100, sample_rate=44100):
         1,   # AudioFormat: 1 (PCM)
         1,   # NumChannels: 1 (mono)
         sample_rate,
-        sample_rate * 2,  # ByteRate: sample_rate * num_channels * bits_per_sample / 8
-        2,   # BlockAlign: num_channels * bits_per_sample / 8
-        16,  # BitsPerSample: 16
+        sample_rate * 2,  # ByteRate
+        2,   # BlockAlign
+        16,  # BitsPerSample
         b"data",
         data_size,
     )
@@ -212,17 +212,41 @@ class TeraTTSProviderTests(unittest.TestCase):
         for s in sentences:
             self.assertIn(s, all_received)
 
-    def test_unauthorized_error_returns_exit_64(self):
+    def test_oversized_token_is_hard_cut(self):
+        giant_token = "A" * 5000
+        res = subprocess.run([TERATTS_PROVIDER], input=giant_token, env=self.env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertGreater(len(self.server.requests), 1)
+        for req in self.server.requests:
+            self.assertLessEqual(len(req["payload"]["text"]), 2000)
+
+    def test_html_tags_and_control_chars_are_sanitized(self):
+        messy_input = "<br>Привет!\r\nТекст с <hr>тегами <li>списка</li> и \x00нулевым байтом."
+        res = subprocess.run([TERATTS_PROVIDER], input=messy_input, env=self.env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        sent_text = self.server.requests[0]["payload"]["text"]
+        self.assertNotIn("<br>", sent_text)
+        self.assertNotIn("<li>", sent_text)
+        self.assertNotIn("\r", sent_text)
+        self.assertNotIn("\x00", sent_text)
+        self.assertIn("Привет!", sent_text)
+
+    def test_pure_emoji_or_whitespace_exits_cleanly_without_requests(self):
+        res = subprocess.run([TERATTS_PROVIDER], input="🎉🚀🎈   ", env=self.env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(len(self.server.requests), 0)
+
+    def test_unauthorized_error_returns_exit_77(self):
         env = {**self.env, "TERATTS_BEARER_TOKEN": "wrong-token"}
         res = subprocess.run([TERATTS_PROVIDER], input="Привет", env=env, capture_output=True, text=True)
-        self.assertEqual(res.returncode, 64)
+        self.assertEqual(res.returncode, 77)
         self.assertIn("HTTP 401", res.stderr)
 
-    def test_server_failure_returns_exit_75(self):
-        self.server.fail_with_code = 503
+    def test_server_failure_returns_exit_74(self):
+        self.server.fail_with_code = 500
         res = subprocess.run([TERATTS_PROVIDER], input="Привет", env=self.env, capture_output=True, text=True)
-        self.assertEqual(res.returncode, 75)
-        self.assertIn("HTTP 503", res.stderr)
+        self.assertEqual(res.returncode, 74)
+        self.assertIn("HTTP 500", res.stderr)
 
     def test_server_offline_returns_exit_74(self):
         env = {**self.env, "TERATTS_URL": "http://127.0.0.1:1"}
@@ -231,7 +255,6 @@ class TeraTTSProviderTests(unittest.TestCase):
         self.assertIn("network error", res.stderr)
 
     def test_raw_preprocessing_in_bin_speak(self):
-        # Verify that speak without --raw preserves technical tokens when provider specifies # preprocess: raw
         tech_text = "Dynamic Resource Allocation работает в Kubernetes 1.35 с UUID 12345678-1234-5678-1234-567812345678."
         cmd = [
             SPEAK,
@@ -242,23 +265,19 @@ class TeraTTSProviderTests(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(len(self.server.requests), 1)
         received_text = self.server.requests[0]["payload"]["text"]
-        # In raw mode, UUID and 1.35 must NOT be collapsed into "identifier" or stripped
         self.assertIn("12345678-1234-5678-1234-567812345678", received_text)
         self.assertIn("Kubernetes 1.35", received_text)
 
     def test_speak_info_and_refresh_voices_teratts(self):
-        # Set provider to teratts
         res = subprocess.run([SPEAK, "--set", ".provider", "teratts"], env=self.env, capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
 
-        # Refresh voices
         res = subprocess.run([SPEAK, "--refresh-voices", "teratts"], env=self.env, capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
         data = json.loads(res.stdout)
         self.assertEqual(data["provider"], "teratts")
         self.assertEqual(data["count"], 4)
 
-        # Query --info
         res = subprocess.run([SPEAK, "--info"], env=self.env, capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
         info = json.loads(res.stdout)
@@ -269,6 +288,12 @@ class TeraTTSProviderTests(unittest.TestCase):
         self.assertEqual(teratts_meta["title"], "TeraTTS")
         self.assertTrue(teratts_meta["refreshVoices"])
         self.assertEqual(teratts_meta["keySource"], "env")
+
+    def test_speak_setup_recognizes_teratts_in_cloud_keys(self):
+        # speak-setup key-remove teratts should not reject as unknown provider
+        res = subprocess.run([SETUP, "key-remove", "teratts"], env=self.env, capture_output=True, text=True)
+        self.assertNotIn("Unknown provider", res.stderr)
+        self.assertNotIn("Unknown provider", res.stdout)
 
 if __name__ == "__main__":
     unittest.main()

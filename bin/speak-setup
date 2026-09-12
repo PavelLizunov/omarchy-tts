@@ -565,7 +565,7 @@ def install_language(code: str) -> None:
 OCR_ENGINES = {"easyocr"}
 # Every cloud key the plugin will store. Google and OpenAI credentials are
 # shared by their speech and OCR adapters.
-CLOUD_KEYS = ("openai", "elevenlabs", "google", "gemini")
+CLOUD_KEYS = ("openai", "elevenlabs", "google", "gemini", "teratts")
 
 
 def build_kokoro(target: Path) -> None:

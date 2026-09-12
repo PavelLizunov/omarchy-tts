@@ -216,14 +216,14 @@ Item {
   }
   function cancelSetup() { if (setupCancellable) action([setupBin, "cancel"]) }
   function storeKey(provider, key, purpose) {
-    if (["openai", "elevenlabs", "google", "gemini"].indexOf(provider) < 0 || key.length < 8) return
+    if (["openai", "elevenlabs", "google", "gemini", "teratts"].indexOf(provider) < 0 || key.length < 8) return
     if (keyProc.running || keySaving) { error = "A key is already being saved."; return }
     error = ""
     pendingKey = key; pendingKeyProvider = provider; pendingKeyPurpose = purpose || "speech"
     keySaving = true; keyResult = { ok: false, message: "" }
     keyProc.command = [setupBin, "key-store", provider]; restart(keyProc)
   }
-  function removeKey(provider) { if (["openai", "elevenlabs", "google", "gemini"].indexOf(provider) >= 0) action([setupBin, "key-remove", provider]) }
+  function removeKey(provider) { if (["openai", "elevenlabs", "google", "gemini", "teratts"].indexOf(provider) >= 0) action([setupBin, "key-remove", provider]) }
 
   Process {
     id: configProc; command: []; stdinEnabled: true

@@ -816,6 +816,7 @@ set_config() { # validated path value; forget proof tied to the old setting
     .kokoro.*) health_key=kokoro ;;
     .gemini.*) health_key=gemini ;;
     .google.*) health_key=google ;;
+    .teratts.*) health_key=teratts ;;
     .ocr.langs) health_key=ocr:tesseract ;;
     .ocr.*.langs)
       if [[ "$path" =~ ^\.ocr\.([A-Za-z0-9._-]+)\.langs$ ]]; then
